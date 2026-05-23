@@ -1,0 +1,28 @@
+# preprocessed data (regenerate via preprocess.py, ~1.2GB)
+preprocessed/data.npy
+preprocessed/ids.npy
+preprocessed/labels.npy
+# keep shape_names.npy (5KB, needed for inference)
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# logs / runtime
+logs/
+*.log
+
+# submission output
+submit/
+submit.csv
+
+# raw dataset (if user happens to drop it here)
+raw_resampled/
+modelnet40_*.txt
