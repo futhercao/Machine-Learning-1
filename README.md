@@ -1,4 +1,4 @@
-# ModelNet40 Point Cloud Classification（赛道一）
+# 三维点云分类
 
 3D 点云分类：5 个模型（PointNet++ SSG ×2 seed + PointNet++ MSG + DGCNN ×2 seed）做 softmax 平均 + 10× TTA 集成。
 
