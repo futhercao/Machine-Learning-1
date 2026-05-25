@@ -17,7 +17,7 @@
 \vspace{-0.6em}
 
 \section{任务}
-输入 10000 个 6 维点 $(x,y,z,n_x,n_y,n_z)$，输出 40 类标签。目标：实例 Acc $\geq 92\%$（+5），类平均 Acc $\geq 90\%$（+5）。
+输入 10000 个 6 维点 $(x,y,z,n_x,n_y,n_z)$，输出 40 类标签。目标：实例 Acc $\geq 92\%$，类平均 Acc $\geq 90\%$。
 
 \section{数据与增强}
 所有样本预压成 \texttt{(N,10000,6)} fp16 单文件 \texttt{data.npy}（$\sim$1.2\,GB），mmap 读取避免小文件 IO；按类别 9:1 分层划分验证集。每 epoch 随机抽 1024 点（隐式增强）。训练增强作用在 $xyz$，法线随旋转矩阵同步：绕 Z 轴随机旋转、各向异性缩放 $[0.8,1.25]$、平移 $\pm 0.1$、抖动 $\mathcal{N}(0,0.01^2)$ 截断 $\pm 0.05$、点 dropout 随机替换 $\leq 12.5\%$ 索引。
@@ -61,7 +61,5 @@ AdamW + warmup-cosine（warmup 2\%，min ratio 0.001）、label smoothing 0.1、
 \bottomrule
 \end{tabular}
 \end{center}
-\vspace{-0.3em}
-两项指标均显著超过阈值（iAcc +4.27\,pt，cAcc +3.46\,pt 裕量），预计 +10 加分。
 
 \end{document}
