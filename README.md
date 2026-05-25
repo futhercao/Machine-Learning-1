@@ -2,11 +2,13 @@
 
 3D 点云分类：5 个模型（PointNet++ SSG ×2 seed + PointNet++ MSG + DGCNN ×2 seed）做 softmax 平均 + 10× TTA 集成。
 
-## 结果
-| 指标 | 验证集 |
-| --- | --- |
-| Instance Accuracy | **96.27%** |
-| Class-mean Accuracy | **93.46%** |
+## 结果（验证集 966 个样本）
+| 指标 | 取值 | 基础门槛 | 追加门槛 |
+| --- | --- | --- | --- |
+| Instance Accuracy | **96.27%** | 90% | 92% (+5) |
+| Class-mean Accuracy | **93.46%** | 85% | 90% (+5) |
+
+5 个模型 softmax 平均 + 10× TTA。
 
 ---
 
@@ -115,8 +117,21 @@ python predict.py \
     --tta 10 --out submit.csv
 
 # 2) 打包成提交 zip
-python make_submission.py --name 姓名 --sid 学号 --csv submit.csv
-# 生成 submit/<姓名>_<学号>.zip
+python make_submission.py --names "姓名1-学号1,姓名2-学号2,姓名3-学号3" --csv submit.csv
+# 生成两个文件交付:
+#   submit/赛道1-姓名1学号1-姓名2学号2-姓名3学号3.csv     ← 作业要求的预测 csv
+#   submit/赛道1-姓名1学号1-姓名2学号2-姓名3学号3.zip     ← 材料(code+ckpt+docs+csv 副本)
+```
+
+### 现场时间紧的应急模式
+
+集成 + TTA 在 CPU 上比较慢（约 10–20 分钟 / 250 样本）。若现场限时紧、只有 CPU，加 `--fast` 直接退化为单模无 TTA（~30 秒 / 250 样本），单模 iAcc 仍能稳过 90% 基础门槛：
+
+```bash
+python predict.py --fast --ckpts checkpoints/pointnet2_msg_s2026.pt \
+    --test_npy <test_data.npy> --ids_npy <test_ids.npy> \
+    --shape_names preprocessed/shape_names.npy --out submit.csv
+# 注: 把单模性能最强的 pointnet2_msg_s2026.pt 放第一位
 ```
 
 **其它可能的测试集形式**（`predict.py` 都支持）：

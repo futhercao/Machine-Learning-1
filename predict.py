@@ -148,7 +148,14 @@ def main():
     p.add_argument('--num_points', type=int, default=1024)
     p.add_argument('--batch_size', type=int, default=32)
     p.add_argument('--tta', type=int, default=10, help='# random samplings to average')
+    p.add_argument('--fast', action='store_true',
+                   help='现场时间紧时启用: TTA=1, 只用第一个 ckpt (单模无 TTA), 适合 CPU 评测')
     args = p.parse_args()
+
+    if args.fast:
+        print("[fast mode] tta=1, single model =", args.ckpts[0])
+        args.tta = 1
+        args.ckpts = [args.ckpts[0]]
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 
@@ -176,6 +183,7 @@ def main():
         models.append(m); use_normals_list.append(un)
 
     M = len(data)
+    P = data.shape[1]   # actual point count per sample
     accum_probs = np.zeros((M, 40), dtype=np.float64)
     rng = np.random.default_rng(2026)
 
@@ -185,7 +193,10 @@ def main():
         seed = int(rng.integers(0, 10**9))
         sampled = np.zeros((M, args.num_points, 6), dtype=np.float32)
         for i in range(M):
-            inds = np.random.default_rng(seed + i).choice(10000, args.num_points, replace=False)
+            if P > args.num_points:
+                inds = np.random.default_rng(seed + i).choice(P, args.num_points, replace=False)
+            else:
+                inds = np.arange(args.num_points) % P   # if test set is already pre-sampled
             sampled[i] = data[i, inds]
         # batched inference
         for i in range(0, M, args.batch_size):
