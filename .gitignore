@@ -23,6 +23,13 @@ logs/
 submit/
 submit.csv
 
+# latex build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
 # raw dataset (if user happens to drop it here)
 raw_resampled/
 modelnet40_*.txt
