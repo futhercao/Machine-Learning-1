@@ -2,6 +2,11 @@
 preprocessed/data.npy
 preprocessed/ids.npy
 preprocessed/labels.npy
+# val materialization (regenerate via dump_val.py)
+preprocessed/val_ids.npy
+preprocessed/val_labels.npy
+preprocessed/val_class_names.npy
+preprocessed/val_summary.csv
 # keep shape_names.npy (5KB, needed for inference)
 
 # python
