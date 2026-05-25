@@ -37,7 +37,7 @@ ModelNetProject/
 ```
 [官方 raw 数据集]            [测试集 (评测时下发)]
      ↓                              ↓
-preprocess.py                  (放置好即可)
+preprocess.py                 
      ↓                              ↓
 preprocessed/                   ┌──────────────────────────────┐
   ├─ data.npy (1.2GB)           │                              │
@@ -78,7 +78,7 @@ python train.py --model dgcnn         --seed 42   --epochs 200 --batch_size 24
 
 ## 四、验证集 & 如何自检
 
-**val 集是怎么来的？**
+**val 集**
 `data_loader.stratified_split(labels, val_ratio=0.1, seed=2026)`：对每个类别独立按 9:1 分层取，**完全由 seed 决定**，所有训练脚本和评估脚本用同一种子，因此 val 集是固定可复现的 966 个样本。
 
 **两种自检方法：**
@@ -99,7 +99,7 @@ python dump_val.py
 
 ## 五、测试集到达后的步骤（最常用）
 
-> **假设场景**：评测方给一个 `test_data.npy`，形状 `(M, 10000, 6)` 或 `(M, P>=1024, 6)`，可能同时附 `test_ids.npy`（`(M,)` 字符串数组，每行是样本 id）。
+> 给一个 `test_data.npy`，形状 `(M, 10000, 6)` 或 `(M, P>=1024, 6)`，可能同时附 `test_ids.npy`（`(M,)` 字符串数组，每行是样本 id）。
 
 ```bash
 # 1) 生成 submit.csv（id,class_name 每行一条，无表头）
