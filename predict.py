@@ -1,60 +1,39 @@
-"""
-Predict on a test set and produce submission CSV.
+"""Predict on a test set with PointMLP + TTA and produce submission CSV.
 
-Two input modes:
-  --test_npy  /path/to/test_data.npy   shape (M, P>=1024, 6)  fp16/fp32
-  --test_dir  /path/to/raw_dir/        same .txt format as training (recurses categories
-                                       OR a flat dir of {sample_id}.txt files)
-  --test_list /path/to/test.txt        list of sample ids (xxx_0001) with --test_root
-                                       pointing to the raw_resampled root
+Supports three input modes:
+  --test_npy  /path/to/test_data.npy   shape (M, P>=1024, 6)
+  --test_dir  /path/to/raw_dir/        .txt files (recursive or flat)
+  --test_list /path/to/test.txt + --test_root
 
 Output: <out_csv> with columns "id,class_name" (no header).
 
-Usage examples:
-    # Single model
-    python predict.py --ckpts checkpoints/pointnet2_ssg_s2026.pt \
-        --test_npy test.npy --ids_npy test_ids.npy --out submit.csv
-
-    # Ensemble + TTA (10 random samplings averaged)
-    python predict.py --ckpts checkpoints/pointnet2_ssg_s2026.pt checkpoints/dgcnn_s2026.pt \
+Usage:
+    python predict.py --ckpt checkpoints/pointmlp.pt \
         --test_npy test.npy --ids_npy test_ids.npy --out submit.csv --tta 10
 """
 import argparse
 import os
 import warnings
-warnings.filterwarnings('ignore')
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from models import build_model
-from data_loader import pc_normalize
+
+warnings.filterwarnings('ignore')
 
 
-def parse_ckpt_name(path):
-    """Infer model name from filename like pointnet2_ssg_s2026.pt or dgcnn_s42.pt"""
-    name = os.path.basename(path).replace('.pt', '')
-    # strip trailing _sXXXX
-    parts = name.split('_')
-    if parts[-1].startswith('s') and parts[-1][1:].isdigit():
-        parts = parts[:-1]
-    return '_'.join(parts)
-
-
-def load_model(ckpt_path, device, use_normals=True):
+def load_model(ckpt_path, device):
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model_name = parse_ckpt_name(ckpt_path)
-    args = ck.get('args', {})
-    use_normals = bool(args.get('use_normals', use_normals))
-    m = build_model(model_name, num_classes=40, use_normals=use_normals).to(device)
+    npts = ck.get('args', {}).get('num_points', 1024)
+    m = build_model('pointmlp', num_classes=40, points=npts).to(device)
     m.load_state_dict(ck['state_dict'])
     m.eval()
-    return m, model_name, use_normals
+    return m
 
 
 def read_txt_pointcloud(path):
-    """Read a .txt file (x,y,z,nx,ny,nz per line)."""
     arr = np.loadtxt(path, delimiter=',', dtype=np.float32)
     if arr.shape[0] < 10000:
         pad = np.tile(arr[-1:], (10000 - arr.shape[0], 1))
@@ -65,7 +44,6 @@ def read_txt_pointcloud(path):
 
 
 def load_test_data(args):
-    """Return (data, ids). data: (M, P, 6) fp32, ids: list of sample id strings."""
     if args.test_npy:
         data = np.load(args.test_npy).astype(np.float32)
         if args.ids_npy:
@@ -89,7 +67,6 @@ def load_test_data(args):
             if (i + 1) % 200 == 0:
                 print(f"  loaded {i+1}/{len(sids)}")
     elif args.test_dir:
-        # walk dir for .txt files
         paths = []
         ids = []
         for d, _, files in os.walk(args.test_dir):
@@ -110,32 +87,9 @@ def load_test_data(args):
     return data, ids
 
 
-def sample_points(arr, n=1024, seed=None):
-    """arr (10000, 6) -> (n, 6) random sample. Returns view if seed=None else deterministic."""
-    rng = np.random.default_rng(seed)
-    if seed is None:
-        idx = rng.choice(arr.shape[0], n, replace=False)
-    else:
-        idx = np.arange(n) if n <= arr.shape[0] else rng.choice(arr.shape[0], n, replace=True)
-    return arr[idx]
-
-
-def predict_batch(models, x, device, use_normals_list):
-    """Average softmax probabilities across an ensemble of models on a batch."""
-    probs = None
-    n = 0
-    for m, un in zip(models, use_normals_list):
-        feat = x if un else x[:, :, :3]
-        logits = m(feat)
-        p = F.softmax(logits, dim=1)
-        probs = p if probs is None else probs + p
-        n += 1
-    return probs / n
-
-
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--ckpts', nargs='+', required=True, help='one or more ckpt paths')
+    p.add_argument('--ckpt', required=True, help='Path to PointMLP checkpoint')
     p.add_argument('--test_npy', default=None)
     p.add_argument('--ids_npy', default=None)
     p.add_argument('--ids_txt', default=None)
@@ -147,68 +101,63 @@ def main():
     p.add_argument('--device', default='cuda')
     p.add_argument('--num_points', type=int, default=1024)
     p.add_argument('--batch_size', type=int, default=32)
-    p.add_argument('--tta', type=int, default=10, help='# random samplings to average')
+    p.add_argument('--tta', type=int, default=10,
+                   help='Number of random subsample rounds for TTA')
     p.add_argument('--fast', action='store_true',
-                   help='现场时间紧时启用: TTA=1, 只用第一个 ckpt (单模无 TTA), 适合 CPU 评测')
+                   help='Fast mode: TTA=1, no GPU needed')
     args = p.parse_args()
 
     if args.fast:
-        print("[fast mode] tta=1, single model =", args.ckpts[0])
+        print("[fast mode] tta=1")
         args.tta = 1
-        args.ckpts = [args.ckpts[0]]
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 
-    print(f"[load test]")
+    print("[load test]")
     data, ids = load_test_data(args)
     print(f"  data {data.shape}, ids n={len(ids)}")
 
-    # normalize whole sample first (in xyz)
-    pts = data[:, :, :3]
+    # Pre-normalize: center + unit-ball over all 10000 points
+    pts = data[:, :, :3].copy()
     centroid = pts.mean(axis=1, keepdims=True)
     pts = pts - centroid
-    m = np.linalg.norm(pts, axis=2).max(axis=1, keepdims=True)[:, :, None]
-    pts = pts / (m + 1e-9)
-    data = data.copy()
-    data[:, :, :3] = pts
+    rad = np.linalg.norm(pts, axis=2).max(axis=1, keepdims=True)[:, :, None]
+    data[:, :, :3] = pts / (rad + 1e-9)
 
     shape_names = np.load(args.shape_names)
     print(f"  classes: {len(shape_names)}")
 
-    print(f"[load models]")
-    models, use_normals_list = [], []
-    for cp in args.ckpts:
-        m, name, un = load_model(cp, device)
-        print(f"  {cp} -> model={name} use_normals={un}")
-        models.append(m); use_normals_list.append(un)
+    print(f"[load model] {args.ckpt}")
+    model = load_model(args.ckpt, device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"  PointMLP {n_params / 1e6:.2f}M params")
 
     M = len(data)
-    P = data.shape[1]   # actual point count per sample
+    P = data.shape[1]
     accum_probs = np.zeros((M, 40), dtype=np.float64)
     rng = np.random.default_rng(2026)
 
     for t in range(args.tta):
-        print(f"[tta {t+1}/{args.tta}]")
-        # sample once across all samples (same seed for all batches in this TTA round)
-        seed = int(rng.integers(0, 10**9))
-        sampled = np.zeros((M, args.num_points, 6), dtype=np.float32)
+        print(f"[tta {t + 1}/{args.tta}]")
+        seed = int(rng.integers(0, 10 ** 9))
+        sampled = np.zeros((M, args.num_points, 3), dtype=np.float32)
         for i in range(M):
             if P > args.num_points:
                 inds = np.random.default_rng(seed + i).choice(P, args.num_points, replace=False)
             else:
-                inds = np.arange(args.num_points) % P   # if test set is already pre-sampled
-            sampled[i] = data[i, inds]
-        # batched inference
+                inds = np.arange(args.num_points) % P
+            sampled[i] = data[i, inds, :3]  # xyz only
+
         for i in range(0, M, args.batch_size):
             x = torch.from_numpy(sampled[i:i + args.batch_size]).to(device)
             with torch.no_grad():
-                prob = predict_batch(models, x, device, use_normals_list)
-            accum_probs[i:i + args.batch_size] += prob.cpu().numpy()
+                p = F.softmax(model(x), dim=1)
+            accum_probs[i:i + args.batch_size] += p.cpu().numpy()
+
     accum_probs /= args.tta
     pred_idx = accum_probs.argmax(axis=1)
     pred_names = [str(shape_names[i]) for i in pred_idx]
 
-    # write CSV
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or '.', exist_ok=True)
     with open(args.out, 'w', encoding='utf-8') as f:
         for sid, name in zip(ids, pred_names):

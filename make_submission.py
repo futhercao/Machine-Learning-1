@@ -30,7 +30,6 @@ import zipfile
 
 SRC = ['train.py', 'predict.py', 'data_loader.py', 'models.py', 'preprocess.py',
        'dump_val.py', 'eval_val.py', 'make_submission.py',
-       'train_gpu0.sh', 'train_gpu0b.sh',
        '设计思路.md', '设计思路.tex', '设计思路.pdf',
        '运行说明.md', 'README.md']
 

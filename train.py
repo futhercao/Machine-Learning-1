@@ -1,94 +1,125 @@
-"""
-Train a point cloud classifier.
+"""Train PointMLP on ModelNet40 (xyz only, AMP mixed precision).
+
+PointMLP recipe (Ma et al., ICLR 2022):
+  - SGD momentum=0.9, weight_decay=2e-4
+  - Cosine LR: 0.1 -> 0.005 over full epochs
+  - Label smoothing = 0.2
+  - Augmentation: random scale (0.66–1.5) + translate (±0.2), no rotation
+
+Saves three checkpoints:
+  - <ckpt>.pt         best val iAcc
+  - <ckpt>_bestcacc.pt  best val cAcc
+  - <ckpt>.last         final epoch
 
 Usage:
-    python train.py --model pointnet2_ssg --epochs 200 --device cuda
+    python train.py --epochs 200 --batch_size 32 --seed 2026
 """
 import argparse
+import math
 import os
 import time
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from data_loader import ModelNet40Dataset, stratified_split
+from data_loader import ModelNet40Dataset, pc_normalize, stratified_split
 from models import build_model
 
 
-def set_seed(s):
-    np.random.seed(s); torch.manual_seed(s)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(s)
+class ModelNetADataset(torch.utils.data.Dataset):
+    """xyz-only dataset over the 10000-pt preprocessed data for PointMLP."""
+
+    def __init__(self, data, labels, indices, num_points=1024, augment=True):
+        self.data = data
+        self.labels = labels
+        self.indices = np.asarray(indices, dtype=np.int64)
+        self.num_points = num_points
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, i):
+        ri = int(self.indices[i])
+        sample = np.asarray(self.data[ri], dtype=np.float32)
+        N = sample.shape[0]
+        if self.augment:
+            choice = np.random.choice(N, self.num_points, replace=False)
+        else:
+            choice = np.arange(self.num_points)
+        pts = sample[choice, :3]  # xyz only
+        pts = pc_normalize(pts)
+        if self.augment:
+            # PointMLP-style augmentation: anisotropic scale + translation
+            pts = pts * np.random.uniform(0.66, 1.5, 3).astype(np.float32)
+            pts = pts + np.random.uniform(-0.2, 0.2, 3).astype(np.float32)
+        return torch.from_numpy(pts.astype(np.float32)), int(self.labels[ri])
+
+
+def cosine_lr(epoch, total, lr0, lr_min):
+    return lr_min + 0.5 * (lr0 - lr_min) * (1 + math.cos(math.pi * epoch / total))
 
 
 def evaluate(model, loader, device, num_classes=40):
     model.eval()
     correct = 0
     total = 0
-    cls_correct = torch.zeros(num_classes)
-    cls_total = torch.zeros(num_classes)
+    cls_c = np.zeros(num_classes)
+    cls_t = np.zeros(num_classes)
     with torch.no_grad():
         for x, y in loader:
-            x = x.to(device, non_blocking=True); y = y.to(device, non_blocking=True)
-            logits = model(x)
-            pred = logits.argmax(1)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            with torch.cuda.amp.autocast():
+                pred = model(x).argmax(1)
             correct += (pred == y).sum().item()
             total += y.size(0)
             for c in range(num_classes):
                 m = (y == c)
-                if m.sum() > 0:
-                    cls_correct[c] += (pred[m] == c).sum().item()
-                    cls_total[c] += m.sum().item()
-    instance_acc = correct / max(total, 1)
-    class_acc = (cls_correct / cls_total.clamp(min=1)).mean().item()
-    return instance_acc, class_acc
-
-
-def warmup_cosine_lr(step, total, warmup, base, min_ratio=0.001):
-    import math
-    if step < warmup:
-        return base * (step + 1) / warmup
-    p = (step - warmup) / max(1, total - warmup)
-    return base * (min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * p)))
+                if m.any():
+                    cls_t[c] += m.sum().item()
+                    cls_c[c] += (pred[m] == c).sum().item()
+    iAcc = correct / max(total, 1)
+    cAcc = (cls_c / np.maximum(cls_t, 1)).mean()
+    return iAcc, cAcc
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--data_dir', default='preprocessed')
-    p.add_argument('--model', required=True)
-    p.add_argument('--num_points', type=int, default=1024)
-    p.add_argument('--use_normals', type=int, default=1)
-    p.add_argument('--num_classes', type=int, default=40)
-    p.add_argument('--batch_size', type=int, default=32)
+    p.add_argument('--ckpt', default='checkpoints/pointmlp.pt')
+    p.add_argument('--log', default='logs/train_pointmlp.log')
     p.add_argument('--epochs', type=int, default=200)
-    p.add_argument('--lr', type=float, default=1e-3)
-    p.add_argument('--weight_decay', type=float, default=1e-4)
-    p.add_argument('--warmup_pct', type=float, default=0.02)
-    p.add_argument('--val_ratio', type=float, default=0.1)
-    p.add_argument('--seed', type=int, default=2026)
-    p.add_argument('--ckpt_dir', default='checkpoints')
-    p.add_argument('--device', default='cuda')
+    p.add_argument('--batch_size', type=int, default=32)
+    p.add_argument('--num_points', type=int, default=1024)
+    p.add_argument('--lr', type=float, default=0.1)
+    p.add_argument('--lr_min', type=float, default=0.005)
+    p.add_argument('--weight_decay', type=float, default=2e-4)
+    p.add_argument('--label_smoothing', type=float, default=0.2)
     p.add_argument('--num_workers', type=int, default=6)
-    p.add_argument('--label_smoothing', type=float, default=0.1)
-    p.add_argument('--patience', type=int, default=40)
+    p.add_argument('--seed', type=int, default=2026)
+    p.add_argument('--eval_every', type=int, default=2)
+    p.add_argument('--device', default='cuda')
     args = p.parse_args()
 
-    set_seed(args.seed)
-    device = torch.device(args.device)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
-    print(f"[load] {args.data_dir}")
-    data = np.load(os.path.join(args.data_dir, 'data.npy'), mmap_mode='r')  # (N, 10000, 6) fp16
+    os.makedirs(os.path.dirname(args.ckpt), exist_ok=True)
+    os.makedirs(os.path.dirname(args.log), exist_ok=True)
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+
+    data = np.load(os.path.join(args.data_dir, 'data.npy'), mmap_mode='r')
     labels = np.load(os.path.join(args.data_dir, 'labels.npy'))
-    print(f"  data {data.shape} {data.dtype}, labels {labels.shape}")
+    train_idx, val_idx = stratified_split(labels, val_ratio=0.1, seed=args.seed)
+    print(f"[split] train={len(train_idx)} val={len(val_idx)} (seed {args.seed})")
 
-    train_idx, val_idx = stratified_split(labels, val_ratio=args.val_ratio, seed=args.seed)
-    print(f"  split: train={len(train_idx)} val={len(val_idx)}")
-
-    use_normals = bool(args.use_normals)
-    train_ds = ModelNet40Dataset(data, labels, train_idx, num_points=args.num_points,
-                                  use_normals=use_normals, augment=True)
-    val_ds = ModelNet40Dataset(data, labels, val_idx, num_points=args.num_points,
-                                use_normals=use_normals, augment=False)
+    train_ds = ModelNetADataset(data, labels, train_idx, args.num_points, augment=True)
+    val_ds = ModelNetADataset(data, labels, val_idx, args.num_points, augment=False)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, pin_memory=True, drop_last=True,
                               persistent_workers=args.num_workers > 0)
@@ -96,57 +127,82 @@ def main():
                             num_workers=args.num_workers, pin_memory=True,
                             persistent_workers=args.num_workers > 0)
 
-    model = build_model(args.model, num_classes=args.num_classes, use_normals=use_normals).to(device)
+    model = build_model('pointmlp', num_classes=40, points=args.num_points).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[model] {args.model} use_normals={use_normals} params={n_params:,}")
+    print(f"[model] PointMLP {n_params / 1e6:.2f}M params, AMP on")
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                   weight_decay=args.weight_decay, betas=(0.9, 0.999))
+    opt = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9,
+                          weight_decay=args.weight_decay)
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    scaler = torch.cuda.amp.GradScaler()
 
-    steps_per_ep = max(1, len(train_loader))
-    total_steps = args.epochs * steps_per_ep
-    warmup_steps = int(args.warmup_pct * total_steps)
+    log_f = open(args.log, 'a')
+    best_iacc = 0.0
+    best_cacc = 0.0
 
-    os.makedirs(args.ckpt_dir, exist_ok=True)
-    best_path = os.path.join(args.ckpt_dir, f"{args.model}_s{args.seed}.pt")
-    best_acc = 0.0; bad = 0
-    step = 0
     for ep in range(args.epochs):
-        t0 = time.time(); model.train()
-        tr_loss, tr_correct, tr_total = 0.0, 0, 0
+        lr = cosine_lr(ep, args.epochs, args.lr, args.lr_min)
+        for g in opt.param_groups:
+            g['lr'] = lr
+
+        model.train()
+        t0 = time.time()
+        tr_loss = 0.0
+        tr_correct = 0
+        tr_total = 0
         for x, y in train_loader:
-            lr = warmup_cosine_lr(step, total_steps, warmup_steps, args.lr)
-            for g in optimizer.param_groups: g['lr'] = lr
-            x = x.to(device, non_blocking=True); y = y.to(device, non_blocking=True)
-            logits = model(x)
-            loss = criterion(logits, y)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            tr_loss += loss.item()
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            with torch.cuda.amp.autocast():
+                logits = model(x)
+                loss = loss_fn(logits, y)
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            tr_loss += loss.item() * y.size(0)
             tr_correct += (logits.argmax(1) == y).sum().item()
             tr_total += y.size(0)
-            step += 1
-        tr_loss /= max(1, len(train_loader))
-        tr_acc = tr_correct / max(tr_total, 1)
 
-        val_iacc, val_cacc = evaluate(model, val_loader, device, args.num_classes)
+        tr_loss /= tr_total
+        tr_acc = tr_correct / tr_total
+
+        do_eval = ((ep + 1) % args.eval_every == 0) or (ep + 1 == args.epochs)
+        if do_eval:
+            iAcc, cAcc = evaluate(model, val_loader, device)
+        else:
+            iAcc, cAcc = float('nan'), float('nan')
+
         dt = time.time() - t0
         mk = ''
-        if val_iacc > best_acc:
-            best_acc = val_iacc; bad = 0
-            torch.save({'state_dict': model.state_dict(), 'args': vars(args),
-                        'val_iacc': val_iacc, 'val_cacc': val_cacc, 'epoch': ep + 1}, best_path)
-            mk = '  *'
-        else:
-            bad += 1
-        print(f"ep {ep+1:3d}/{args.epochs} | lr {lr:.5f} | tr_loss {tr_loss:.4f} tr_acc {tr_acc:.4f} "
-              f"| val iAcc {val_iacc:.4f} cAcc {val_cacc:.4f} | {dt:.1f}s{mk}")
-        if bad >= args.patience:
-            print(f"[stop] no improvement for {args.patience}"); break
-    print(f"[done] best val iAcc = {best_acc:.4f}  -> {best_path}")
+        save = {
+            'state_dict': model.state_dict(),
+            'epoch': ep + 1,
+            'args': vars(args),
+            'val_iacc': iAcc,
+            'val_cacc': cAcc,
+            'model': 'pointmlp',
+        }
+        torch.save(save, args.ckpt + '.last')
+        if do_eval and iAcc > best_iacc:
+            best_iacc = iAcc
+            torch.save(save, args.ckpt)
+            mk += ' *iAcc'
+        if do_eval and cAcc > best_cacc:
+            best_cacc = cAcc
+            torch.save(save, args.ckpt.replace('.pt', '_bestcacc.pt'))
+            mk += ' *cAcc'
+
+        line = (f"ep {ep + 1:3d}/{args.epochs} lr={lr:.4f} loss={tr_loss:.4f} "
+                f"tr_acc={tr_acc:.4f} val_iAcc={iAcc:.4f} val_cAcc={cAcc:.4f} "
+                f"[{dt:.0f}s]{mk}")
+        print(line, flush=True)
+        log_f.write(line + "\n")
+        log_f.flush()
+
+    print(f"[done] best val iAcc={best_iacc:.4f} cAcc={best_cacc:.4f}")
+    log_f.write(f"[done] best val iAcc={best_iacc:.4f} cAcc={best_cacc:.4f}\n")
+    log_f.close()
 
 
 if __name__ == '__main__':
