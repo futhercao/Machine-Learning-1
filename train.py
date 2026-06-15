@@ -63,6 +63,7 @@ def cosine_lr(epoch, total, lr0, lr_min):
 
 
 def evaluate(model, loader, device, num_classes=40):
+    """Evaluate in fp32 for consistent, accurate checkpoint selection."""
     model.eval()
     correct = 0
     total = 0
@@ -72,8 +73,7 @@ def evaluate(model, loader, device, num_classes=40):
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
-            with torch.cuda.amp.autocast():
-                pred = model(x).argmax(1)
+            pred = model(x).argmax(1)
             correct += (pred == y).sum().item()
             total += y.size(0)
             for c in range(num_classes):
@@ -129,12 +129,13 @@ def main():
 
     model = build_model('pointmlp', num_classes=40, points=args.num_points).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[model] PointMLP {n_params / 1e6:.2f}M params, AMP on")
+    amp_device = 'cuda' if device.type == 'cuda' else 'cpu'
+    print(f"[model] PointMLP {n_params / 1e6:.2f}M params, AMP ({amp_device})")
 
     opt = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9,
                           weight_decay=args.weight_decay)
     loss_fn = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler(amp_device)
 
     log_f = open(args.log, 'a')
     best_iacc = 0.0
@@ -153,7 +154,7 @@ def main():
         for x, y in train_loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(amp_device):
                 logits = model(x)
                 loss = loss_fn(logits, y)
             opt.zero_grad(set_to_none=True)

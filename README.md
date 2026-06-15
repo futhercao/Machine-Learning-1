@@ -85,7 +85,7 @@ eval_val.py              make_submission.py
 
 ```bash
 # 1) 预处理：raw .txt → npy
-python preprocess.py --raw <RAW_DIR> --out preprocessed
+python preprocess.py --root <RAW_DIR> --out_dir preprocessed
 
 # 2) 训练 PointMLP（单卡 RTX A6000，~5 小时 200 epoch）
 python train.py --epochs 200 --batch_size 32 --seed 2026
