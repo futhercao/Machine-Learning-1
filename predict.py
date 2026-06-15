@@ -33,13 +33,13 @@ def load_model(ckpt_path, device):
     return m
 
 
-def read_txt_pointcloud(path):
+def read_txt_pointcloud(path, max_points=10000):
     arr = np.loadtxt(path, delimiter=',', dtype=np.float32)
-    if arr.shape[0] < 10000:
-        pad = np.tile(arr[-1:], (10000 - arr.shape[0], 1))
+    if arr.shape[0] < max_points:
+        pad = np.tile(arr[-1:], (max_points - arr.shape[0], 1))
         arr = np.concatenate([arr, pad], axis=0)
-    elif arr.shape[0] > 10000:
-        arr = arr[:10000]
+    elif arr.shape[0] > max_points:
+        arr = arr[:max_points]
     return arr
 
 
@@ -56,14 +56,14 @@ def load_test_data(args):
     elif args.test_list and args.test_root:
         with open(args.test_list) as f:
             sids = [s.strip() for s in f if s.strip()]
-        data = np.zeros((len(sids), 10000, 6), dtype=np.float32)
+        data = np.zeros((len(sids), args.max_points, args.num_features), dtype=np.float32)
         ids = sids
         for i, sid in enumerate(sids):
             cls = '_'.join(sid.split('_')[:-1])
             path = os.path.join(args.test_root, cls, sid + '.txt')
             if not os.path.exists(path):
                 path = os.path.join(args.test_root, sid + '.txt')
-            data[i] = read_txt_pointcloud(path)
+            data[i] = read_txt_pointcloud(path, args.max_points)
             if (i + 1) % 200 == 0:
                 print(f"  loaded {i+1}/{len(sids)}")
     elif args.test_dir:
@@ -77,9 +77,9 @@ def load_test_data(args):
         order = sorted(range(len(ids)), key=lambda i: ids[i])
         ids = [ids[i] for i in order]
         paths = [paths[i] for i in order]
-        data = np.zeros((len(ids), 10000, 6), dtype=np.float32)
+        data = np.zeros((len(ids), args.max_points, args.num_features), dtype=np.float32)
         for i, p in enumerate(paths):
-            data[i] = read_txt_pointcloud(p)
+            data[i] = read_txt_pointcloud(p, args.max_points)
             if (i + 1) % 200 == 0:
                 print(f"  loaded {i+1}/{len(ids)}")
     else:
@@ -105,6 +105,10 @@ def main():
                    help='Number of random subsample rounds for TTA')
     p.add_argument('--fast', action='store_true',
                    help='Fast mode: TTA=1, no GPU needed')
+    p.add_argument('--max_points', type=int, default=10000,
+                   help='Max points per sample when loading txt (default: 10000)')
+    p.add_argument('--num_features', type=int, default=6,
+                   help='Feature dimension (6=xyz+normal, 3=xyz-only; default: 6)')
     args = p.parse_args()
 
     if args.fast:

@@ -6,7 +6,7 @@
 
 | 指标 | 训练 val | 测试 test |
 | --- | --- | --- |
-| Instance Accuracy | **93.48%** | **93.19%** |
+| Instance Accuracy | **93.48%** | **93.23%** |
 | Class-mean Accuracy | **90.61%** | **90.34%** |
 
 > 目标：iAcc > 92%、cAcc > 90% ✅ 双双达标。
@@ -17,18 +17,22 @@
 
 ```
 ModelNetProject/
-├─ preprocess.py        # 官方 raw .txt → preprocessed/*.npy
+├─ preprocess.py        # 原始 .txt → preprocessed/*.npy
 ├─ data_loader.py       # 数据集 + 增强 + 分层验证集划分
-├─ models.py            # PointMLP 模型
+├─ models.py            # PointMLP 模型 (ICLR 2022)
 ├─ train.py             # 单模型训练 (AMP + SGD cosine)
 ├─ predict.py           # PointMLP + TTA 推理 → submit.csv
 ├─ eval_val.py          # 在验证集上评测
+├─ eval_test.py         # 在测试集上评测 + 自动计算准确率
 ├─ dump_val.py          # 导出 val 集 id / label 列表
 ├─ make_submission.py   # 打包提交 zip
+├─ eval_test.sh         # 服务器测试集评测脚本
+├─ run.sh               # 验收脚本（一键推理 + 生成 submit.csv）
 ├─ checkpoints/
 │   └─ pointmlp.pt      # 训练好的 ckpt
 ├─ preprocessed/
 │   └─ shape_names.npy  # 40 类名 (data.npy 由 preprocess.py 重建)
+├─ requirements.txt
 ├─ 设计思路.md / .tex / .pdf
 └─ 运行说明.md
 ```
@@ -86,6 +90,9 @@ eval_val.py              make_submission.py
 ```bash
 # 1) 预处理：raw .txt → npy
 python preprocess.py --root <RAW_DIR> --out_dir preprocessed
+# 可选参数：--sample_list modelnet40_train.txt
+#          --shape_names_file modelnet40_shape_names.txt
+#          --num_points 10000 --num_features 6
 
 # 2) 训练 PointMLP（单卡 RTX A6000，~5 小时 200 epoch）
 python train.py --epochs 200 --batch_size 32 --seed 2026
@@ -98,20 +105,33 @@ python train.py --epochs 200 --batch_size 32 --seed 2026
 ## 五、测试
 
 ```bash
-# npy 测试集
+# 方式 1：id 列表 + 根目录（教师数据集标准格式）
 python predict.py --ckpt checkpoints/pointmlp.pt \
-    --test_npy <test_data.npy> --ids_npy <test_ids.npy> \
-    --shape_names preprocessed/shape_names.npy \
+    --test_list <test.txt> --test_root <TEST_ROOT> \
     --tta 10 --out submit.csv
 
-# 应急快速模式（单模无 TTA，CPU 可跑）
-python predict.py --fast --ckpt checkpoints/pointmlp.pt \
-    --test_npy <test_data.npy> --ids_npy <test_ids.npy> \
-    --shape_names preprocessed/shape_names.npy --out submit.csv
-
-# txt 目录
+# 方式 2：npy 测试集
 python predict.py --ckpt checkpoints/pointmlp.pt \
-    --test_dir <TEST_DIR> --shape_names preprocessed/shape_names.npy --out submit.csv
+    --test_npy <test_data.npy> --ids_npy <test_ids.npy> \
+    --tta 10 --out submit.csv
+
+# 方式 3：txt 目录
+python predict.py --ckpt checkpoints/pointmlp.pt \
+    --test_dir <TEST_DIR> --tta 10 --out submit.csv
+
+# 应急快速模式（TTA=1，CPU 可跑）
+python predict.py --fast --ckpt checkpoints/pointmlp.pt \
+    --test_list <test.txt> --test_root <TEST_ROOT> --out submit.csv
+```
+
+### 服务器验收
+
+```bash
+# 一键运行（编辑 run.sh 顶部 TEST_ROOT 后）
+bash run.sh
+
+# 或手动
+bash eval_test.sh
 ```
 
 ---

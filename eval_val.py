@@ -61,7 +61,7 @@ def main():
         seed = int(rng.integers(0, 10 ** 9))
         sampled = np.zeros((M, args.num_points, 3), dtype=np.float32)
         for i in range(M):
-            ind = np.random.default_rng(seed + i).choice(10000, args.num_points, replace=False)
+            ind = np.random.default_rng(seed + i).choice(val_data.shape[1], args.num_points, replace=False)
             sampled[i] = val_data[i, ind, :3]  # xyz only
         for i in range(0, M, args.batch_size):
             x = torch.from_numpy(sampled[i:i + args.batch_size]).to(device)
